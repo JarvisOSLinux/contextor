@@ -390,6 +390,129 @@ impl Store {
         serde_json::json!({ "ok": true, "pruned": pruned })
     }
 
+    pub fn cmd_replace_active(
+        &mut self,
+        theme: &str,
+        content: &str,
+        vector: Vec<f32>,
+        metadata: Option<Value>,
+        session_id: Option<&str>,
+    ) -> Value {
+        let archived_at = now_f64();
+        let new_id = if content.is_empty() {
+            None
+        } else {
+            Some(Uuid::new_v4().to_string())
+        };
+
+        if let Err(e) = self.conn.execute_batch("BEGIN IMMEDIATE") {
+            return serde_json::json!({ "ok": false, "error": e.to_string() });
+        }
+
+        let result = (|| -> rusqlite::Result<usize> {
+            // Copy existing active entries for this theme into mementos.
+            // `session_id IS ?` is NULL-safe: matches NULL when param is NULL.
+            let archived = self.conn.execute(
+                "INSERT INTO mementos
+                     (id, theme, content, vector, stored_at, archived_at, metadata, session_id)
+                 SELECT id, theme, content, vector, stored_at, ?1, metadata, session_id
+                 FROM entries
+                 WHERE theme = ?2 AND session_id IS ?3",
+                params![archived_at, theme, session_id],
+            )?;
+
+            self.conn.execute(
+                "DELETE FROM entries WHERE theme = ?1 AND session_id IS ?2",
+                params![theme, session_id],
+            )?;
+
+            if let Some(ref id) = new_id {
+                let stored_at = now_f64();
+                let blob = encode_vector(&vector);
+                let meta_str = metadata.as_ref().map(|m| m.to_string());
+                self.conn.execute(
+                    "INSERT INTO entries
+                         (id, theme, content, vector, stored_at, metadata, session_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![id, theme, content, blob, stored_at, meta_str, session_id],
+                )?;
+            }
+
+            Ok(archived)
+        })();
+
+        match result {
+            Ok(archived_count) => {
+                if let Err(e) = self.conn.execute_batch("COMMIT") {
+                    let _ = self.conn.execute_batch("ROLLBACK");
+                    return serde_json::json!({ "ok": false, "error": e.to_string() });
+                }
+                self.index.remove_theme(theme);
+                if let Some(ref id) = new_id {
+                    self.index.push(
+                        id.clone(),
+                        theme.to_string(),
+                        vector,
+                        session_id.map(str::to_string),
+                    );
+                }
+                let forgotten = content.is_empty();
+                serde_json::json!({
+                    "ok": true,
+                    "archived": archived_count > 0,
+                    "forgotten": forgotten,
+                    "theme": theme,
+                })
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                serde_json::json!({ "ok": false, "error": e.to_string() })
+            }
+        }
+    }
+
+    pub fn cmd_peek_memento(
+        &self,
+        theme: &str,
+        limit: usize,
+        session_id: Option<&str>,
+    ) -> Value {
+        let result = (|| -> rusqlite::Result<Vec<Value>> {
+            let mut stmt = self.conn.prepare(
+                "SELECT content, stored_at, archived_at, metadata
+                 FROM mementos
+                 WHERE theme = ?1 AND session_id IS ?2
+                 ORDER BY archived_at DESC
+                 LIMIT ?3",
+            )?;
+            stmt.query_map(params![theme, session_id, limit as i64], |row| {
+                let content: String = row.get(0)?;
+                let stored_at: f64 = row.get(1)?;
+                let archived_at: f64 = row.get(2)?;
+                let meta_raw: Option<String> = row.get(3)?;
+                let metadata: Value = meta_raw
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or(Value::Null);
+                Ok(serde_json::json!({
+                    "content": content,
+                    "stored_at": format_unix_secs(stored_at as u64),
+                    "archived_at": format_unix_secs(archived_at as u64),
+                    "metadata": metadata,
+                }))
+            })
+            .and_then(|rows| rows.collect())
+        })();
+
+        match result {
+            Ok(mementos) => serde_json::json!({
+                "ok": true,
+                "theme": theme,
+                "mementos": mementos,
+            }),
+            Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+        }
+    }
+
     pub fn cmd_reindex(&mut self) -> Value {
         match load_index(&self.conn) {
             Ok(idx) => {
@@ -654,6 +777,22 @@ fn migrate(conn: &Connection) -> Result<(), Box<dyn std::error::Error>> {
     // Ensure the index exists (safe to run on both fresh and migrated DBs)
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_session_id ON entries (session_id);",
+    )?;
+
+    // Mementos table — archived history of replaced/forgotten entries
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS mementos (
+            id          TEXT PRIMARY KEY,
+            theme       TEXT NOT NULL,
+            content     TEXT NOT NULL,
+            vector      BLOB NOT NULL,
+            stored_at   REAL NOT NULL,
+            archived_at REAL NOT NULL,
+            metadata    TEXT,
+            session_id  TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_memento_theme_archived
+            ON mementos (theme, archived_at);",
     )?;
 
     Ok(())

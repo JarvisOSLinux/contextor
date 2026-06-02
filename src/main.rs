@@ -70,6 +70,29 @@ enum Command {
         max_per_theme: usize,
     },
 
+    /// Replace the active entry for a theme, archiving the old one as a memento.
+    /// Empty content = forget (no new active entry created).
+    ReplaceActive {
+        theme: String,
+        #[serde(default)]
+        content: String,
+        #[serde(default)]
+        vector: Vec<f32>,
+        #[serde(default)]
+        metadata: Option<Value>,
+        #[serde(default)]
+        session_id: Option<String>,
+    },
+
+    /// Return the last N archived (memento) entries for a theme, newest first.
+    PeekMemento {
+        theme: String,
+        #[serde(default = "default_memento_limit")]
+        limit: usize,
+        #[serde(default)]
+        session_id: Option<String>,
+    },
+
     /// Rebuild the in-memory vector index from stored entries.
     Reindex,
 
@@ -115,6 +138,7 @@ fn default_top_k() -> usize { 5 }
 fn default_retention_days() -> u64 { 90 }
 fn default_max_per_theme() -> usize { 500 }
 fn default_sessions_limit() -> usize { 50 }
+fn default_memento_limit() -> usize { 5 }
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -175,6 +199,12 @@ fn dispatch(store: &mut Store, cmd: Command) -> Value {
         }
         Command::List { session_id } => store.cmd_list(session_id.as_deref()),
         Command::Delete { theme } => store.cmd_delete(&theme),
+        Command::ReplaceActive { theme, content, vector, metadata, session_id } => {
+            store.cmd_replace_active(&theme, &content, vector, metadata, session_id.as_deref())
+        }
+        Command::PeekMemento { theme, limit, session_id } => {
+            store.cmd_peek_memento(&theme, limit, session_id.as_deref())
+        }
         Command::Prune { retention_days, max_per_theme } => {
             store.cmd_prune(retention_days, max_per_theme)
         }
