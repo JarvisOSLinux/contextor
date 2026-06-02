@@ -481,7 +481,8 @@ impl Store {
             let mut stmt = self.conn.prepare(
                 "SELECT content, stored_at, archived_at, metadata
                  FROM mementos
-                 WHERE theme = ?1 AND session_id IS ?2
+                 WHERE theme = ?1
+                   AND (?2 IS NULL OR session_id = ?2 OR session_id IS NULL)
                  ORDER BY archived_at DESC
                  LIMIT ?3",
             )?;
