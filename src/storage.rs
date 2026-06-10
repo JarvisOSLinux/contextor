@@ -75,7 +75,7 @@ impl VectorIndex {
         let mut scored: Vec<(f32, &str)> = self
             .entries
             .iter()
-            .filter(|e| theme_filter.map_or(true, |t| e.theme == t))
+            .filter(|e| theme_filter.is_none_or(|t| e.theme == t))
             .filter(|e| match session_filter {
                 None => true,
                 Some(sid) => e.session_id.as_deref() == Some(sid) || e.session_id.is_none(),
@@ -228,8 +228,7 @@ impl Store {
 
         // Fetch content from DB for the matched IDs
         let ids: Vec<&str> = window.iter().map(|(_, id)| *id).collect();
-        let placeholders: String = std::iter::repeat("?")
-            .take(ids.len())
+        let placeholders: String = std::iter::repeat_n("?", ids.len())
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
@@ -237,20 +236,20 @@ impl Store {
             placeholders
         );
 
-        let result =
-            (|| -> rusqlite::Result<Vec<(String, String, String, f64, Option<String>)>> {
-                let mut stmt = self.conn.prepare(&sql)?;
-                stmt.query_map(rusqlite::params_from_iter(ids.iter()), |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, f64>(3)?,
-                        row.get::<_, Option<String>>(4)?,
-                    ))
-                })
-                .and_then(|rows| rows.collect())
-            })();
+        type SearchRow = (String, String, String, f64, Option<String>);
+        let result = (|| -> rusqlite::Result<Vec<SearchRow>> {
+            let mut stmt = self.conn.prepare(&sql)?;
+            stmt.query_map(rusqlite::params_from_iter(ids.iter()), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, f64>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })
+            .and_then(|rows| rows.collect())
+        })();
 
         match result {
             Ok(rows) => {
@@ -679,7 +678,8 @@ fn load_index(conn: &Connection) -> Result<VectorIndex, Box<dyn std::error::Erro
     let mut stmt =
         conn.prepare("SELECT id, theme, vector, session_id FROM entries ORDER BY stored_at ASC")?;
 
-    let rows: rusqlite::Result<Vec<(String, String, Vec<u8>, Option<String>)>> = stmt
+    type IndexRow = (String, String, Vec<u8>, Option<String>);
+    let rows: rusqlite::Result<Vec<IndexRow>> = stmt
         .query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -792,7 +792,7 @@ fn days_to_ymd(total_days: u64) -> (u32, u32, u32) {
 }
 
 fn is_leap(year: u32) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
 // ---------------------------------------------------------------------------
