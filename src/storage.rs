@@ -27,11 +27,18 @@ struct VectorIndex {
 
 impl VectorIndex {
     fn new() -> Self {
-        Self { entries: Vec::new() }
+        Self {
+            entries: Vec::new(),
+        }
     }
 
     fn push(&mut self, id: String, theme: String, vector: Vec<f32>, session_id: Option<String>) {
-        self.entries.push(IndexEntry { id, theme, vector, session_id });
+        self.entries.push(IndexEntry {
+            id,
+            theme,
+            vector,
+            session_id,
+        });
     }
 
     fn remove_theme(&mut self, theme: &str) {
@@ -39,7 +46,8 @@ impl VectorIndex {
     }
 
     fn remove_session(&mut self, session_id: &str) {
-        self.entries.retain(|e| e.session_id.as_deref() != Some(session_id));
+        self.entries
+            .retain(|e| e.session_id.as_deref() != Some(session_id));
     }
 
     fn len(&self) -> usize {
@@ -67,7 +75,7 @@ impl VectorIndex {
         let mut scored: Vec<(f32, &str)> = self
             .entries
             .iter()
-            .filter(|e| theme_filter.map_or(true, |t| e.theme == t))
+            .filter(|e| theme_filter.is_none_or(|t| e.theme == t))
             .filter(|e| match session_filter {
                 None => true,
                 Some(sid) => e.session_id.as_deref() == Some(sid) || e.session_id.is_none(),
@@ -76,9 +84,7 @@ impl VectorIndex {
             .filter(|(s, _)| *s >= min_score)
             .collect();
 
-        scored.sort_unstable_by(|a, b| {
-            b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        scored.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         scored
     }
 }
@@ -106,7 +112,11 @@ impl Store {
 
         let index = load_index(&conn)?;
 
-        Ok(Store { conn, index, storage_path })
+        Ok(Store {
+            conn,
+            index,
+            storage_path,
+        })
     }
 
     // -----------------------------------------------------------------------
@@ -141,7 +151,12 @@ impl Store {
                         params![now, sid],
                     );
                 }
-                self.index.push(id, theme.to_string(), vector, session_id.map(str::to_string));
+                self.index.push(
+                    id,
+                    theme.to_string(),
+                    vector,
+                    session_id.map(str::to_string),
+                );
                 serde_json::json!({ "ok": true, "theme": theme })
             }
             Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
@@ -200,11 +215,12 @@ impl Store {
         theme_filter: Option<&str>,
         session_id: Option<&str>,
     ) -> Value {
-        let scored = self.index.search(query, min_score, theme_filter, session_id);
+        let scored = self
+            .index
+            .search(query, min_score, theme_filter, session_id);
 
         // Apply offset + top_k window
-        let window: Vec<(f32, &str)> =
-            scored.into_iter().skip(offset).take(top_k).collect();
+        let window: Vec<(f32, &str)> = scored.into_iter().skip(offset).take(top_k).collect();
 
         if window.is_empty() {
             return serde_json::json!({ "ok": true, "results": [], "available": true });
@@ -212,8 +228,7 @@ impl Store {
 
         // Fetch content from DB for the matched IDs
         let ids: Vec<&str> = window.iter().map(|(_, id)| *id).collect();
-        let placeholders: String = std::iter::repeat("?")
-            .take(ids.len())
+        let placeholders: String = std::iter::repeat_n("?", ids.len())
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
@@ -221,7 +236,8 @@ impl Store {
             placeholders
         );
 
-        let result = (|| -> rusqlite::Result<Vec<(String, String, String, f64, Option<String>)>> {
+        type SearchRow = (String, String, String, f64, Option<String>);
+        let result = (|| -> rusqlite::Result<Vec<SearchRow>> {
             let mut stmt = self.conn.prepare(&sql)?;
             stmt.query_map(rusqlite::params_from_iter(ids.iter()), |row| {
                 Ok((
@@ -252,15 +268,17 @@ impl Store {
                 let results: Vec<Value> = window
                     .iter()
                     .filter_map(|(score, id)| {
-                        content_map.remove(*id).map(|(content, theme, stored_at, session_id)| {
-                            serde_json::json!({
-                                "content": content,
-                                "theme": theme,
-                                "score": score,
-                                "stored_at": stored_at,
-                                "session_id": session_id,
+                        content_map
+                            .remove(*id)
+                            .map(|(content, theme, stored_at, session_id)| {
+                                serde_json::json!({
+                                    "content": content,
+                                    "theme": theme,
+                                    "score": score,
+                                    "stored_at": stored_at,
+                                    "session_id": session_id,
+                                })
                             })
-                        })
                     })
                     .collect();
 
@@ -409,7 +427,9 @@ impl Store {
 
         let themes: i64 = self
             .conn
-            .query_row("SELECT COUNT(DISTINCT theme) FROM entries", [], |r| r.get(0))
+            .query_row("SELECT COUNT(DISTINCT theme) FROM entries", [], |r| {
+                r.get(0)
+            })
             .unwrap_or(0);
 
         serde_json::json!({
@@ -639,32 +659,27 @@ fn migrate(conn: &Connection) -> Result<(), Box<dyn std::error::Error>> {
     // SQLite does not support IF NOT EXISTS on ALTER TABLE, so we check first.
     let columns: Vec<String> = {
         let mut stmt = conn.prepare("PRAGMA table_info(entries)")?;
-        let rows: rusqlite::Result<Vec<String>> = stmt
-            .query_map([], |row| row.get::<_, String>(1))?
-            .collect();
+        let rows: rusqlite::Result<Vec<String>> =
+            stmt.query_map([], |row| row.get::<_, String>(1))?.collect();
         rows?
     };
 
     if !columns.iter().any(|c| c == "session_id") {
-        conn.execute_batch(
-            "ALTER TABLE entries ADD COLUMN session_id TEXT DEFAULT NULL;",
-        )?;
+        conn.execute_batch("ALTER TABLE entries ADD COLUMN session_id TEXT DEFAULT NULL;")?;
     }
 
     // Ensure the index exists (safe to run on both fresh and migrated DBs)
-    conn.execute_batch(
-        "CREATE INDEX IF NOT EXISTS idx_session_id ON entries (session_id);",
-    )?;
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_session_id ON entries (session_id);")?;
 
     Ok(())
 }
 
 fn load_index(conn: &Connection) -> Result<VectorIndex, Box<dyn std::error::Error>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, theme, vector, session_id FROM entries ORDER BY stored_at ASC",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT id, theme, vector, session_id FROM entries ORDER BY stored_at ASC")?;
 
-    let rows: rusqlite::Result<Vec<(String, String, Vec<u8>, Option<String>)>> = stmt
+    type IndexRow = (String, String, Vec<u8>, Option<String>);
+    let rows: rusqlite::Result<Vec<IndexRow>> = stmt
         .query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -713,7 +728,10 @@ fn now_iso8601() -> String {
     let h = (secs / 3600) % 24;
     let m = (secs / 60) % 60;
     let s = secs % 60;
-    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", year, month, day, h, m, s)
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        year, month, day, h, m, s
+    )
 }
 
 fn generate_session_id() -> String {
@@ -749,7 +767,16 @@ fn days_to_ymd(total_days: u64) -> (u32, u32, u32) {
     let month_lengths: [u32; 12] = [
         31,
         if is_leap(year) { 29 } else { 28 },
-        31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
     ];
 
     let mut month = 1u32;
@@ -765,7 +792,7 @@ fn days_to_ymd(total_days: u64) -> (u32, u32, u32) {
 }
 
 fn is_leap(year: u32) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
 // ---------------------------------------------------------------------------
@@ -847,7 +874,8 @@ mod tests {
                 params![old_ts],
             )
             .unwrap();
-        s.index.push("old-id".into(), "theme".into(), vec![1.0_f32], None);
+        s.index
+            .push("old-id".into(), "theme".into(), vec![1.0_f32], None);
         let r = s.cmd_prune(30, 1000);
         assert_eq!(r["ok"], true);
         assert!(r["pruned"].as_u64().unwrap() >= 1);
@@ -992,7 +1020,13 @@ mod tests {
 
         s.cmd_store("t", "global item", vec![1.0_f32, 0.0], None, None);
         s.cmd_store("t", "my session item", vec![1.0_f32, 0.0], None, Some(&sid));
-        s.cmd_store("t", "other session item", vec![1.0_f32, 0.0], None, Some("other000"));
+        s.cmd_store(
+            "t",
+            "other session item",
+            vec![1.0_f32, 0.0],
+            None,
+            Some("other000"),
+        );
 
         let r = s.cmd_search(&[1.0, 0.0], 10, 0, 0.0, None, Some(&sid));
         let contents: Vec<&str> = r["results"]
@@ -1046,7 +1080,12 @@ mod tests {
                 params![old_ts, sid],
             )
             .unwrap();
-        s.index.push("sess-old".into(), "theme".into(), vec![1.0_f32], Some(sid.clone()));
+        s.index.push(
+            "sess-old".into(),
+            "theme".into(),
+            vec![1.0_f32],
+            Some(sid.clone()),
+        );
 
         // Old global entry — MUST be pruned
         s.conn
@@ -1056,7 +1095,8 @@ mod tests {
                 params![old_ts],
             )
             .unwrap();
-        s.index.push("glob-old".into(), "theme".into(), vec![1.0_f32], None);
+        s.index
+            .push("glob-old".into(), "theme".into(), vec![1.0_f32], None);
 
         let r = s.cmd_prune(30, 1000);
         assert_eq!(r["ok"], true);
