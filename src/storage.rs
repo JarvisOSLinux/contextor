@@ -553,7 +553,15 @@ impl Store {
             ),
         };
         match result {
-            Ok(_) => serde_json::json!({ "ok": true }),
+            Ok(_) => {
+                // Return the updated session so callers can refresh their cache.
+                let get = self.cmd_get_session(session_id);
+                if get.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    serde_json::json!({ "ok": true, "session": get["session"] })
+                } else {
+                    serde_json::json!({ "ok": true })
+                }
+            }
             Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
         }
     }
