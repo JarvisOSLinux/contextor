@@ -59,6 +59,17 @@ impl VectorIndex {
         self.entries.first().map(|e| e.vector.len()).unwrap_or(0)
     }
 
+    /// Count of entries per vector dimension, keyed by dimension as a string.
+    /// A single key means the index is uniform; multiple keys signal an
+    /// embedding-model change that has silently split the memory store.
+    fn dimension_histogram(&self) -> std::collections::BTreeMap<String, usize> {
+        let mut hist = std::collections::BTreeMap::new();
+        for e in &self.entries {
+            *hist.entry(e.vector.len().to_string()).or_insert(0) += 1;
+        }
+        hist
+    }
+
     /// Score every entry with optional theme and session filters.
     ///
     /// `session_filter = Some(sid)`: include entries where `session_id == sid`
@@ -131,6 +142,26 @@ impl Store {
         metadata: Option<Value>,
         session_id: Option<&str>,
     ) -> Value {
+        // Guard the embedding-dimension invariant. A cosine query against a
+        // wrong-dimension vector silently scores 0.0, so an unchecked store
+        // (empty, or a different embedding model) would make memories vanish
+        // from search with no error. Reject at the boundary instead.
+        if vector.is_empty() {
+            return serde_json::json!({ "ok": false, "error": "empty vector rejected" });
+        }
+        let expected = self.index.dim();
+        if expected != 0 && vector.len() != expected {
+            return serde_json::json!({
+                "ok": false,
+                "error": format!(
+                    "dimension mismatch: index holds {}-dim vectors, got {} \
+                     (embedding model changed? reindex to migrate)",
+                    expected,
+                    vector.len()
+                )
+            });
+        }
+
         let id = Uuid::new_v4().to_string();
         let stored_at = now_f64();
         let blob = encode_vector(&vector);
@@ -432,11 +463,15 @@ impl Store {
             })
             .unwrap_or(0);
 
+        let dimension_histogram =
+            serde_json::to_value(self.index.dimension_histogram()).unwrap_or(Value::Null);
+
         serde_json::json!({
             "ok": true,
             "total_entries": total,
             "themes": themes,
             "vector_dimensions": self.index.dim(),
+            "dimension_histogram": dimension_histogram,
             "storage_path": self.storage_path.to_string_lossy(),
         })
     }
@@ -839,6 +874,51 @@ mod tests {
         let r = s.cmd_recall("nonexistent", 10, None);
         assert_eq!(r["ok"], true);
         assert_eq!(r["found"], false);
+    }
+
+    #[test]
+    fn store_rejects_empty_vector() {
+        let mut s = temp_store();
+        let r = s.cmd_store("t", "content", vec![], None, None);
+        assert_eq!(r["ok"], false);
+        assert!(r["error"].as_str().unwrap().contains("empty"));
+    }
+
+    #[test]
+    fn store_rejects_dimension_mismatch() {
+        let mut s = temp_store();
+        assert_eq!(
+            s.cmd_store("t", "a", vec![1.0_f32, 0.0, 0.0], None, None)["ok"],
+            true
+        );
+        // A different-dimension vector would silently score 0.0 forever; reject it.
+        let r = s.cmd_store("t", "b", vec![1.0_f32, 0.0], None, None);
+        assert_eq!(r["ok"], false);
+        assert!(r["error"].as_str().unwrap().contains("dimension mismatch"));
+        // The bad entry must not have landed.
+        assert_eq!(s.cmd_status()["total_entries"], 1);
+    }
+
+    #[test]
+    fn store_accepts_matching_dimension() {
+        let mut s = temp_store();
+        assert_eq!(
+            s.cmd_store("t", "a", vec![1.0_f32, 0.0], None, None)["ok"],
+            true
+        );
+        assert_eq!(
+            s.cmd_store("t", "b", vec![0.0_f32, 1.0], None, None)["ok"],
+            true
+        );
+    }
+
+    #[test]
+    fn status_reports_dimension_histogram() {
+        let mut s = temp_store();
+        s.cmd_store("t", "a", vec![1.0_f32, 0.0, 0.0], None, None);
+        s.cmd_store("t", "b", vec![0.0_f32, 1.0, 0.0], None, None);
+        let st = s.cmd_status();
+        assert_eq!(st["dimension_histogram"]["3"], 2);
     }
 
     #[test]
