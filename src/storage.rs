@@ -196,12 +196,18 @@ impl Store {
 
     pub fn cmd_recall(&self, theme: &str, limit: usize, session_id: Option<&str>) -> Value {
         let result = (|| -> rusqlite::Result<Vec<Value>> {
+            // Most-recent N, returned oldest-first for natural reading order.
+            // rowid tiebreaks same-instant stores (stored_at is wall-clock).
             let mut stmt = self.conn.prepare(
                 "SELECT content, theme, stored_at, metadata, session_id
-                 FROM entries
-                 WHERE theme = ?1 AND (?2 IS NULL OR session_id = ?2)
-                 ORDER BY stored_at ASC
-                 LIMIT ?3",
+                 FROM (
+                     SELECT content, theme, stored_at, metadata, session_id, rowid AS rid
+                     FROM entries
+                     WHERE theme = ?1 AND (?2 IS NULL OR session_id = ?2)
+                     ORDER BY stored_at DESC, rid DESC
+                     LIMIT ?3
+                 )
+                 ORDER BY stored_at ASC, rid ASC",
             )?;
             stmt.query_map(params![theme, session_id, limit as i64], |row| {
                 let content: String = row.get(0)?;
@@ -866,6 +872,23 @@ mod tests {
         assert_eq!(r["ok"], true);
         assert_eq!(r["found"], true);
         assert_eq!(r["entries"][0]["content"], "hello world");
+    }
+
+    #[test]
+    fn recall_returns_most_recent_n_oldest_first() {
+        let mut s = temp_store();
+        let v = vec![1.0_f32, 0.0, 0.0];
+        for i in 0..5 {
+            s.cmd_store("log", &format!("entry-{i}"), v.clone(), None, None);
+        }
+        let r = s.cmd_recall("log", 3, None);
+        assert_eq!(r["ok"], true);
+        let entries = r["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 3);
+        // Window is the newest 3 (entry-2..entry-4), oldest-first within it
+        assert_eq!(entries[0]["content"], "entry-2");
+        assert_eq!(entries[1]["content"], "entry-3");
+        assert_eq!(entries[2]["content"], "entry-4");
     }
 
     #[test]

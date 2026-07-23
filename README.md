@@ -30,7 +30,7 @@ echo '{"cmd": "status"}' | ./target/release/contextor
 | Command | Description |
 |---------|-------------|
 | `store` | Store a memory entry with theme, content, vector, and optional metadata |
-| `recall` | Recall the N oldest entries for a theme (oldest-first, `ORDER BY stored_at ASC LIMIT N`) |
+| `recall` | Recall the N most recent entries for a theme (returned oldest-first for reading order) |
 | `search` | Vector similarity search (optional theme/session filter) |
 | `list` | List distinct themes |
 | `delete` | Delete all entries for a theme |
@@ -86,4 +86,6 @@ AGPL-3.0
 
 ## Changelog — corrected claims
 
-*2026-07-22:* database path corrected to `~/.local/share/jarvis/memory/contextor.db` (`JARVIS_DATA_DIR` override documented); `delete` deletes a whole theme (there is no by-ID deletion); `recall` returns the N oldest entries; `update_session` takes title/rolling summary only (message_count is automatic); retention corrected (age pruning skips session entries, count pruning applies per theme-per-session bucket); `store` vector validation and corruption recovery documented; `status` payload described accurately.
+*2026-07-22:* database path corrected to `~/.local/share/jarvis/memory/contextor.db` (`JARVIS_DATA_DIR` override documented); `delete` deletes a whole theme (there is no by-ID deletion); `update_session` takes title/rolling summary only (message_count is automatic); retention corrected (age pruning skips session entries, count pruning applies per theme-per-session bucket); `store` vector validation and corruption recovery documented; `status` payload described accurately.
+
+*2026-07-23:* `recall` fixed to return the N most recent entries (was oldest-N — `ORDER BY stored_at ASC LIMIT N` selected the head of the table), returned oldest-first within the window; rowid tiebreak for same-instant stores.
