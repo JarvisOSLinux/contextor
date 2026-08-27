@@ -32,3 +32,27 @@ jobs:
 
       - name: Build
         run: cargo build --release
+
+  # The crate has only ever been exercised on Linux, and the release workflow
+  # now ships Windows and macOS binaries. Build and test there too so a
+  # portability break surfaces on the PR instead of at tag time. Formatting and
+  # lints stay on the reference platform above, where their output is stable.
+  cross:
+    name: cross (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test
+
+      - name: Build
+        run: cargo build --release
